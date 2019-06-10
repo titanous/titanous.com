@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head><meta content="width=device-width, initial-scale=1.0" name="viewport" />
+    <meta charset="utf-8" />
+    <meta content="Jonathan Rudenberg" name="author" />
+    <title>Jonathan Rudenberg</title>
+    <link href="/assets/styles/stylesheet-cbb924aa137.css" media="screen" rel="stylesheet" type="text/css" />
+    <link href="/posts.xml" rel="alternate" title="Atom feed" type="application/atom+xml" />
+    <script src="//use.typekit.com/dcx3rfw.js" type="text/javascript"></script>
+    <script type="text/javascript">try{Typekit.load();}catch(e){}</script>
+    <script type="text/javascript">(function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+      (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+      m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+      })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+      
+      ga('create', 'UA-33075837-1', 'auto', { 'siteSpeedSampleRate': 100 });
+      ga('set', 'anonymizeIp', true);
+      ga('send', 'pageview');</script></head>
+  <body>
+    <div id="content"><div id="about-box">
+        <a class="home" href="/" rel="author">Jonathan Rudenberg</a>
+        <ul>
+          <li><a href="https://github.com/titanous">GitHub</a></li>
+          <li><a href="mailto:jonathan@titanous.com">Email</a></li>
+          <li><a href="/posts.xml">Feed</a></li>
+          <li><a href="/dsp-stingrays">Stingrays</a></li>
+        </ul>
+      </div><div id="main"><article>
+  <h1><a href="/posts/docker-insecurity">Docker Image Insecurity</a></h1>
+  <date datetime="2014-12-23T11:30:00-04:00" pubdate="pubdate" title="2014-12-23 11:30 ">December 23, 2014</date><p>Recently while downloading an “official” container image with Docker I saw this line:</p>
+
+<pre><code>ubuntu:14.04: The image you are pulling has been verified
+</code></pre>
+
+<p>I assumed this referenced Docker’s <a href="https://blog.docker.com/2014/10/docker-1-3-signed-images-process-injection-security-options-mac-shared-directories/">heavily
+promoted</a>
+image signing system and didn’t investigate further at the time. Later, while
+researching the cryptographic digest system that Docker tries to secure images
+with, I had the opportunity to explore further. What I found was a total
+systemic failure of all logic related to image security.</p>
+
+<p>Docker’s report that a downloaded image is “verified” is based solely on the
+presence of a signed manifest, and Docker never verifies the image checksum from
+the manifest. An attacker could provide any image alongside a signed manifest.
+This opens the door to a number of serious vulnerabilities.</p>
+
+<p>Images are downloaded from an HTTPS server and go through an insecure streaming
+processing pipeline in the Docker daemon:</p>
+
+<pre><code>[decompress] -&gt; [tarsum] -&gt; [unpack]
+</code></pre>
+
+<p>This pipeline is performant but completely insecure. Untrusted input should not
+be processed before verifying its signature. Unfortunately Docker processes
+images three times before checksum verification is supposed to occur.</p>
+
+<p>However, despite <a href="https://blog.docker.com/2014/10/docker-1-3-signed-images-process-injection-security-options-mac-shared-directories/">Docker’s
+claims</a>,
+image checksums are never actually checked. This is the only section<sup id="fnref:0" role="doc-noteref"><a href="#fn:0" class="footnote">0</a></sup> of
+Docker’s code related to verifying image checksums, and I was unable to trigger
+the warning even when presenting images with mismatched checksums.</p>
+
+<pre><code>if img.Checksum != "" &amp;&amp; img.Checksum != checksum {
+  log.Warnf("image layer checksum mismatch: computed %q,
+             expected %q", checksum, img.Checksum)
+}
+</code></pre>
+
+<h2 id="insecure-processing-pipeline">Insecure processing pipeline</h2>
+
+<h3 id="decompress">Decompress</h3>
+
+<p>Docker supports three compression algorithms: gzip, bzip2, and xz. The first two
+use the Go standard library implementations, which are
+<a href="https://en.wikipedia.org/wiki/Memory_safety">memory-safe</a>, so the exploit
+types I’d expect to see here are denial of service attacks like crashes and
+excessive CPU and memory usage.</p>
+
+<p>The third compression algorithm, xz, is more interesting. Since there is no
+native Go implementation, Docker
+<a href="https://github.com/docker/docker/blob/0874f9ab77a7957633cd835241a76ee4406196d8/pkg/archive/archive.go#L91-L95">execs</a>
+the <code>xz</code> binary to do the decompression.</p>
+
+<p>The <code>xz</code> binary comes from the <a href="http://tukaani.org/xz/">XZ Utils</a> project, and
+is built from approximately<sup id="fnref:1" role="doc-noteref"><a href="#fn:1" class="footnote">1</a></sup> twenty thousand lines of C code. C is not
+a memory-safe language. This means malicious input to a C program, in this case
+the Docker image XZ Utils is unpacking, could potentially execute arbitrary
+code.</p>
+
+<p>Docker exacerbates this situation by <em>running <code>xz</code> as root</em>. This means that if
+there is a single vulnerability in <code>xz</code>, a call to <code>docker pull</code> could result in
+the complete compromise of your entire system.</p>
+
+<h3 id="tarsum">Tarsum</h3>
+
+<p>The use of tarsum is well-meaning but completely flawed. In order to get
+a deterministic checksum of the contents of an arbitrarily encoded tar file,
+Docker decodes the tar and then hashes specific portions, while excluding
+others, in a <a href="https://github.com/docker/docker/blob/0874f9ab77a7957633cd835241a76ee4406196d8/pkg/tarsum/tarsum_spec.md">deterministic
+order</a>.</p>
+
+<p>Since this processing is done in order to generate the checksum, it is decoding
+untrusted data which could be designed to exploit the tarsum code<sup id="fnref:2" role="doc-noteref"><a href="#fn:2" class="footnote">2</a></sup>. Potential
+exploits here are denial of service as well as logic flaws that could cause
+files to be injected, skipped, processed differently, modified, appended to,
+etc. without the checksum changing.</p>
+
+<h3 id="unpacking">Unpacking</h3>
+
+<p>Unpacking consists of decoding the tar and placing files on the disk. This is
+extraordinarily dangerous as there have been three other vulnerabilities
+reported<sup id="fnref:3" role="doc-noteref"><a href="#fn:3" class="footnote">3</a></sup> in the unpack stage at the time of writing.</p>
+
+<p><strong>There is no situation where data that has not been verified should be unpacked
+onto disk.</strong></p>
+
+<h2 id="libtrust">libtrust</h2>
+
+<p><a href="https://github.com/docker/libtrust">libtrust</a> is a Docker package that claims
+to provide “authorization and access control through a distributed trust graph.”
+Unfortunately no specification appears to exist, however it looks like it
+implements some parts of the <a href="https://tools.ietf.org/html/draft-ietf-jose-json-web-signature-11">Javascript Object Signing and
+Encryption</a>
+specifications along with other unspecified algorithms.</p>
+
+<p>Downloading an image with a manifest signed and verified using libtrust is what
+triggers this inaccurate message (only the manifest is checked, not the actual
+image contents):</p>
+
+<pre><code>ubuntu:14.04: The image you are pulling has been verified
+</code></pre>
+
+<p>Currently only “official” image manifests published by Docker, Inc are signed
+using this system, but from discussions I participated in at the last Docker
+Governance Advisory Board meeting<sup id="fnref:4" role="doc-noteref"><a href="#fn:4" class="footnote">4</a></sup>, my understanding is that Docker, Inc is
+planning on deploying this more widely in the future. The intended goal is
+centralization with Docker, Inc controlling a Certificate Authority that then
+signs images and/or client certificates.</p>
+
+<p>I looked for the signing key in Docker’s code but was unable to find it. As it
+turns out the key is not embedded in the binary as one would expect. Instead the
+Docker daemon fetches it <a href="https://github.com/docker/docker/blob/0874f9ab77a7957633cd835241a76ee4406196d8/trust/trusts.go#L38">over HTTPS from
+a CDN</a>
+before each image download. This is a terrible approach as a variety of attacks
+could lead to trusted keys being replaced with malicious ones. These attacks
+include but are not limited to: compromise of the CDN vendor, compromise of the
+CDN origin serving the key, and man in the middle attacks on clients downloading
+the keys.</p>
+
+<h2 id="remediation">Remediation</h2>
+
+<p>I <a href="https://github.com/docker/docker/issues/9719">reported</a> some of the issues
+I found with the tarsum system before I finished this research, but so far
+nothing I have reported has been fixed.</p>
+
+<p>Some steps I believe should be taken to improve the security of the Docker image
+download system:</p>
+
+<h3 id="drop-tarsum-and-actually-verify-image-digests">Drop tarsum and actually verify image digests</h3>
+
+<p>Tarsum should not be used for security. Instead, images must be fully downloaded
+and their cryptographic signatures verified before any processing takes place.</p>
+
+<h3 id="add-privilege-isolation">Add privilege isolation</h3>
+
+<p>Image processing steps that involve decompression or unpacking should be run in
+isolated processes (containers?) that have only the bare minimum required
+privileges to operate. There is no scenario where a decompression tool like <code>xz</code>
+should be run as root.</p>
+
+<h3 id="replace-libtrust">Replace libtrust</h3>
+
+<p>Libtrust should be replaced with <a href="http://theupdateframework.com/">The Update
+Framework</a> which is explicitly designed to solve
+the real problems around signing software binaries. The threat model is very
+comprehensive and addresses many things that have not been considered in
+libtrust. There is a complete specification as well as a reference
+implementation written in Python, and I have begun work on a <a href="https://github.com/flynn/go-tuf">Go
+implementation</a> and welcome contributions.</p>
+
+<p>As part of adding TUF to Docker, a local keystore should be added that maps root
+keys to registry URLs so that users can have their own signing keys that are not
+managed by Docker, Inc.</p>
+
+<p>I would like to note that using non-Docker, Inc hosted registries is a very poor
+user experience in general. Docker, Inc seems content with relegating third
+party registries to second class status when there is no technical reason to do
+so. This is a problem both for the ecosystem in general and the security of end
+users. A comprehensive, decentralized security model for third party registries
+is both necessary and desirable. I encourage Docker, Inc to take this into
+consideration when redesigning their security model and image verification
+system.</p>
+
+<h2 id="conclusion">Conclusion</h2>
+
+<p>Docker users should be aware that the code responsible for downloading images is
+shockingly insecure. Users should only download images whose provenance is
+without question. At present, this does <em>not</em> include “trusted” images hosted by
+Docker, Inc including the official Ubuntu and other base images.</p>
+
+<p>The best option is to block <code>index.docker.io</code> locally, and download and verify
+images manually before importing them into Docker using <code>docker load</code>. Red Hat’s
+security blog has <a href="https://securityblog.redhat.com/2014/12/18/before-you-initiate-a-docker-pull/">a good post about
+this</a>.</p>
+
+<p><em>Thanks to Lewis Marshall for pointing out the tarsums are never verified.</em></p>
+
+<div class="footnotes" role="doc-endnotes">
+  <ol start="0">
+    <li id="fn:0" role="doc-endnote">
+      <p><a href="https://github.com/docker/docker/blob/0874f9ab77a7957633cd835241a76ee4406196d8/image/image.go#L114-L116">Checksum code context</a>. <a href="#fnref:0" class="reversefootnote" role="doc-backlink">&#8617;</a></p>
+    </li>
+    <li id="fn:1" role="doc-endnote">
+      <p><a href="http://cloc.sourceforge.net/">cloc</a> says 18,141 non-blank, non-comment lines of C and 5,900 lines of headers in v5.2.0. <a href="#fnref:1" class="reversefootnote" role="doc-backlink">&#8617;</a></p>
+    </li>
+    <li id="fn:2" role="doc-endnote">
+      <p>Very similar bugs been <a href="http://www.saurik.com/id/17">found in Android</a>, which allowed arbitrary files to be injected into signed packages, and <a href="http://blogs.technet.com/b/srd/archive/2013/12/10/ms13-098-update-to-enhance-the-security-of-authenticode.aspx">the Windows Authenticode</a> signature system, which allowed binary modification. <a href="#fnref:2" class="reversefootnote" role="doc-backlink">&#8617;</a></p>
+    </li>
+    <li id="fn:3" role="doc-endnote">
+      <p>Specifically: <a href="https://web.nvd.nist.gov/view/vuln/detail?vulnId=CVE-2014-6407">CVE-2014-6407</a>, <a href="https://web.nvd.nist.gov/view/vuln/detail?vulnId=CVE-2014-9356">CVE-2014-9356</a>, and <a href="https://web.nvd.nist.gov/view/vuln/detail?vulnId=CVE-2014-9357">CVE-2014-9357</a>. There were two Docker <a href="https://groups.google.com/forum/#!msg/docker-user/IrjXTHA6jJc/ZToMGL2yG_AJ">security</a> <a href="https://groups.google.com/d/topic/docker-user/nFAz-B-n4Bw/discussion">releases</a> in response. <a href="#fnref:3" class="reversefootnote" role="doc-backlink">&#8617;</a></p>
+    </li>
+    <li id="fn:4" role="doc-endnote">
+      <p>See page 8 of the <a href="https://docs.google.com/document/d/1JfWNzfwptsMgSx82QyWH_Aj0DRKyZKxYQ1aursxNorg/edit?pli=1">notes from the 2014-10-28 DGAB meeting</a>. <a href="#fnref:4" class="reversefootnote" role="doc-backlink">&#8617;</a></p>
+    </li>
+  </ol>
+</div>
+</article><article>
+  <h1><a href="/posts/twitter-facebook-venmo-sms-spoofing">SMS Vulnerability in Twitter, Facebook, and Venmo</a></h1>
+  <date datetime="2012-12-03T12:25:00-04:00" pubdate="pubdate" title="2012-12-03 12:25 ">December 3, 2012</date><p><strong>Update</strong>: Twitter has fixed the issue for users of short codes. Users that use
+  a “long code” should enable the PIN code in their account.</p>
+  
+  <p>Twitter users with SMS enabled are vulnerable to an attack that allows anyone to
+  post to their account. The attacker only needs knowledge of the mobile number
+  associated with a target’s Twitter account. Messages can then be sent to Twitter
+  with the source number spoofed.</p>
+  
+  <p>Like email, the originating address of a SMS cannot be trusted. Many SMS
+  gateways allow the originating address of a message to be set to an arbitrary
+  identifier, including someone else’s number.</p>
+  
+  <p>Facebook and Venmo were also vulnerable to the same spoofing attack, but
+  the issues were resolved after disclosing to their respective security teams.</p>
+  
+  <h2 id="scope">Scope</h2>
+  
+  <h3 id="users">Users</h3>
+  
+  <p>Users of Twitter that have a mobile number associated with their account and
+  have not set a PIN code are vulnerable. All of the Twitter <a href="http://support.twitter.com/articles/14020-twitter-sms-commands">SMS
+  commands</a> can be
+  used by an attacker, including the ability to post tweets and modify profile
+  info.</p>
+  
+  <h3 id="service-providers">Service Providers</h3>
+  
+  <p>All services that trust the originating address of SMS messages implicitly and
+  are not using a short code are vulnerable.</p>
+  
+  <h2 id="mitigation">Mitigation</h2>
+  
+  <h3 id="users-1">Users</h3>
+  
+  <p>Until Twitter removes the ability to post via non-short code numbers, users
+  should enable PIN codes (if available in their region) or disable the mobile
+  text messaging feature.</p>
+  
+  <p>Twitter has a PIN code feature that requires every message to be prepended
+  with a four-digit alphanumeric code. This feature mitigates the issue, but is
+  not available to users inside the United States.</p>
+  
+  <h3 id="service-providers-1">Service Providers</h3>
+  
+  <p>The cleanest solution for providers is to use only an SMS short code to receive
+  incoming messages. In most cases, messages to short codes do not leave the
+  carrier network and can only be sent by subscribers. This removes the ease of
+  spoofing via SMS gateways.</p>
+  
+  <p>An alternative, less user-friendly but more secure solution is to require
+  a challenge-response for every message. After receiving an SMS, the service
+  would reply with a short alphanumeric string that needs to be repeated back
+  before the message is processed.</p>
+  
+  <h2 id="disclosure-timelines">Disclosure Timelines</h2>
+  
+  <h3 id="twitter">Twitter</h3>
+  
+  <p>The issue I filed was initially inspected by a member of their security team,
+  but was then routed to the normal support team who did not believe that SMS
+  spoofing was possible. I then reached out directly to someone on the security
+  team who said that it was an “old issue” but that they did not want me to
+  publish until they got “a fix in place”. I received no further communication
+  from Twitter.</p>
+  
+  <table>
+    <tbody>
+      <tr>
+        <td>17 Aug 2012</td>
+        <td>I notified Twitter about the vulnerability via their web form.</td>
+      </tr>
+      <tr>
+        <td>20 Aug 2012</td>
+        <td>Twitter Security routed my report to their mobile support team.</td>
+      </tr>
+      <tr>
+        <td>6 Sep 2012</td>
+        <td>Twitter asked me not to publish until they have fixed the issue.</td>
+      </tr>
+      <tr>
+        <td>15 Oct 2012</td>
+        <td>I requested an update on the issue, and receive no response.</td>
+      </tr>
+      <tr>
+        <td>28 Nov 2012</td>
+        <td>I notified Twitter that I would publicly disclose this issue.</td>
+      </tr>
+      <tr>
+        <td>4 Dec 2012</td>
+        <td>I received confirmation that the issue has been resolved.</td>
+      </tr>
+    </tbody>
+  </table>
+  
+  <h3 id="facebook">Facebook</h3>
+  
+  <p>Initially Facebook did not respond to my report on their security vulnerability
+  page. I then emailed a friend who works at Facebook, who facilitated my contact
+  with their security team.</p>
+  
+  <table>
+    <tbody>
+      <tr>
+        <td>19 Aug 2012</td>
+        <td>I notified Facebook about the vulnerability via their web form.</td>
+      </tr>
+      <tr>
+        <td>6 Sep 2012</td>
+        <td>I received a response after getting a friend on the engineering team to bump the issue internally.</td>
+      </tr>
+      <tr>
+        <td>28 Nov 2012</td>
+        <td>I received confirmation that the issue had been resolved.</td>
+      </tr>
+    </tbody>
+  </table>
+  
+  <p><strong>Disclosure:</strong> I will receive a bounty from Facebook for finding and reporting
+  this issue to them. The <a href="https://www.facebook.com/whitehat/bounty/">Facebook bounty
+  program</a> requires responsible
+  disclosure and time to resolve internally in “good faith” before publishing.</p>
+  
+  <h3 id="venmo">Venmo</h3>
+  
+  <p>I initially disclosed this issue to Venmo support, as they do not have
+  a security contact published. When I did not receive a response, I notified the
+  Braintree security team (Braintree <a href="http://blog.venmo.com/post/29565341097/venmo-joins-braintree">recently
+  acquired</a> Venmo),
+  who responded very promptly.</p>
+  
+  <table>
+    <tbody>
+      <tr>
+        <td>29 Nov 2012</td>
+        <td>I notified Venmo support about the vulnerability.</td>
+      </tr>
+      <tr>
+        <td>30 Nov 2012</td>
+        <td>I notified Braintree security and received a response within 40 minutes.</td>
+      </tr>
+      <tr>
+        <td>1 Dec 2012</td>
+        <td>I received confirmation that Venmo SMS payments have been disabled, mitigating the vulnerability.</td>
+      </tr>
+    </tbody>
+  </table>
+  </article><article>
+  <h1><a href="/posts/vulnerabilities-in-heroku-build-system">Vulnerabilities in Heroku’s Build System</a></h1>
+  <date datetime="2012-07-03T16:45:00-04:00" pubdate="pubdate" title="2012-07-03 16:45 EDT">July 3, 2012</date><p><strong>Update</strong>: <a href="http://blog.heroku.com/archives/2012/7/3/codon_security_issue_and_response/">Heroku’s official response</a>.</p>
+
+<p>Last week I discovered a major security flaw in the
+<a href="http://www.heroku.com/">Heroku</a> <a href="https://devcenter.heroku.com/articles/cedar">Cedar
+stack</a> <a href="https://devcenter.heroku.com/articles/slug-compiler">build
+system</a>. This vulnerability
+exposed sensitive information including API keys, private keys and server
+credentials.</p>
+
+<p>Once I realized the extent of the vulnerability, I immediately informed Heroku.
+I have been in regular contact with their security team and the problem has
+since been fixed.</p>
+
+<p>Understanding the issue requires operational knowledge of the Cedar stack build
+system.</p>
+
+<h2 id="cedar-build-process">Cedar Build Process</h2>
+
+<p>Since <a href="http://www.infoq.com/presentations/Running-Heroku-on-Heroku/">Heroku runs on
+Heroku</a>, after
+receiving a git push of an application, the build request is dispatched to
+a regular Heroku app named <em>Codon</em> that handles builds. Codon runs
+a <a href="https://devcenter.heroku.com/articles/buildpacks">buildpack</a> which compiles
+the application so that it can be deployed.</p>
+
+<p>Normally apps running on Heroku are entirely isolated using <a href="https://en.wikipedia.org/wiki/LXC">Linux
+Containers</a>, but to perform builds Codon runs
+untrusted code in this container.</p>
+
+<h2 id="source-code-exposure">Source Code Exposure</h2>
+
+<p>I encountered a Ruby exception and backtrace from the Heroku build system while
+experimenting with <a href="https://devcenter.heroku.com/articles/buildpack-api">custom
+buildpacks</a>. Ruby
+backtraces look like this:</p>
+
+<pre><code>app.rb:2:in `foo': undefined method `a' for nil:NilClass (NoMethodError)
+        from app.rb:5:in `&lt;main&gt;'
+</code></pre>
+
+<p>Backtraces include the paths to the source files that encountered the exception.
+This pointed me to the source files for Codon, which indicated the possibility
+of gaining read access to the code.</p>
+
+<p>I then ran a custom buildpack that copied the source code into my Heroku app and
+verified that it was possible to view the source code of Codon.</p>
+
+<p>While examining the source code I discovered that there was another
+vulnerability that was much more serious than source code exposure.</p>
+
+<h2 id="sensitive-credential-exposure">Sensitive Credential Exposure</h2>
+
+<p>Like most Heroku apps, Codon uses <a href="https://en.wikipedia.org/wiki/Environment_variable">environment
+variables</a> to configure
+runtime options including sensitive credentials. This ensures that credentials
+are not checked into version control. However, due to the constraints of Heroku
+containers, Codon is running as the same user as the buildpack, which is
+untrusted. This allows the buildpack to dump the environment variables of Codon
+from the Linux process table:</p>
+
+<pre><code>cat /proc/*/environ
+</code></pre>
+
+<p>The environment variables exposed included critical credentials such as internal
+API keys, a SSH private key with access to source code repositories, Redis
+connection details, and a key with access to their
+<a href="http://campfirenow.com/">Campfire</a> account.</p>
+
+<h2 id="disclosure-timeline">Disclosure Timeline</h2>
+
+<p>Immediately after discovering this vulnerability, I sent an email to Heroku’s
+security team to start the disclosure process. I requested a PGP key first, as
+they did not provide one on their website. Here is the discovery and disclosure
+timeline:</p>
+
+<table>
+  <tbody>
+    <tr>
+      <td>2012-06-26 19:45 PDT</td>
+      <td>Encountered backtrace and began experimenting.</td>
+    </tr>
+    <tr>
+      <td>2012-06-26 20:25 PDT</td>
+      <td>Sent email to Heroku asking for PGP key.</td>
+    </tr>
+    <tr>
+      <td>2012-06-26 22:40 PDT</td>
+      <td>Received PGP key from Heroku.</td>
+    </tr>
+    <tr>
+      <td>2012-06-26 22:56 PDT</td>
+      <td>Received follow-up email with mobile phone number of a Heroku security engineer.</td>
+    </tr>
+    <tr>
+      <td>2012-06-26 22:58 PDT</td>
+      <td>Sent PGP encrypted description of the vulnerability.</td>
+    </tr>
+    <tr>
+      <td>2012-06-26 23:06 PDT</td>
+      <td>Received confirmation of receipt.</td>
+    </tr>
+    <tr>
+      <td>2012-06-27 12:01 PDT</td>
+      <td>Received confirmation that an interim patch would be pushed in a few hours, and full patch by Tuesday (2012-07-03).</td>
+    </tr>
+    <tr>
+      <td>2012-06-28 20:44 PDT</td>
+      <td>Checked validity of credentials, SSH and Campfire keys were still valid.</td>
+    </tr>
+    <tr>
+      <td>2012-06-29 16:13 PDT</td>
+      <td>Checked validity of credentials, all credentials were invalid.</td>
+    </tr>
+    <tr>
+      <td>2012-07-03 13:35 PDT</td>
+      <td>Received confirmation that the issue had been patched.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="customer-impact">Customer Impact</h2>
+
+<p>The build system appears to have been vulnerable since the Cedar stack
+<a href="http://blog.heroku.com/archives/2011/5/31/celadon_cedar/">launched</a> about
+a year ago. Customer applications and credentials could have been compromised at
+some point due to the credential exposed by the vulnerability. Anyone who ran
+applications on Heroku during this period should immediately reset all sensitive
+credentials, and audit their access logs to determine if any infrastructure or
+data has been accessed.</p>
+
+<p>I suspect that a variant of this vulnerability may exist in other Platform as
+a Service build systems. Further research is warranted.</p>
+
+<p><em><strong>Disclosure</strong>: At the time of publishing, I was a Heroku customer. Heroku offered me a paid
+penetration test contract, but required that I sign a retroactive non-disclosure
+agreement which would have precluded publishing this article.</em></p>
+</article></div>
+    </div>
+  </body>
+</html>

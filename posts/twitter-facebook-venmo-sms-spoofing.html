@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head><meta content="width=device-width, initial-scale=1.0" name="viewport" />
+    <meta charset="utf-8" />
+    <meta content="Jonathan Rudenberg" name="author" />
+    <title>SMS Vulnerability in Twitter, Facebook, and Venmo · Jonathan Rudenberg</title>
+    <link href="/assets/styles/stylesheet-cbb924aa137.css" media="screen" rel="stylesheet" type="text/css" />
+    <link href="/posts.xml" rel="alternate" title="Atom feed" type="application/atom+xml" />
+    <script src="//use.typekit.com/dcx3rfw.js" type="text/javascript"></script>
+    <script type="text/javascript">try{Typekit.load();}catch(e){}</script>
+    <script type="text/javascript">(function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+      (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+      m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+      })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+      
+      ga('create', 'UA-33075837-1', 'auto', { 'siteSpeedSampleRate': 100 });
+      ga('set', 'anonymizeIp', true);
+      ga('send', 'pageview');</script>
+    <meta content="summary" name="twitter:card" />
+    <meta content="@titanous" name="twitter:site" />
+    <meta content="@titanous" name="twitter:creator" />
+    <meta content="SMS Vulnerability in Twitter, Facebook, and Venmo" name="og:title" />
+    <meta content="Twitter users with SMS enabled were vulnerable to an attack that allowed anyone to post to their account. The attacker only needed knowledge of the mobile number associated with a target's Twitter account." name="og:description" />
+  </head>
+  <body>
+    <div id="content"><div id="about-box">
+        <a class="home" href="/" rel="author">Jonathan Rudenberg</a>
+        <ul>
+          <li><a href="https://github.com/titanous">GitHub</a></li>
+          <li><a href="mailto:jonathan@titanous.com">Email</a></li>
+          <li><a href="/posts.xml">Feed</a></li>
+          <li><a href="/dsp-stingrays">Stingrays</a></li>
+        </ul>
+      </div><div id="main"><article>
+          <h1><a href="/posts/twitter-facebook-venmo-sms-spoofing">SMS Vulnerability in Twitter, Facebook, and Venmo</a></h1>
+          <date datetime="2012-12-03T12:25:00-04:00" pubdate="pubdate" title="2012-12-03 12:25 ">December 3, 2012</date><p><strong>Update</strong>: Twitter has fixed the issue for users of short codes. Users that use
+          a “long code” should enable the PIN code in their account.</p>
+          
+          <p>Twitter users with SMS enabled are vulnerable to an attack that allows anyone to
+          post to their account. The attacker only needs knowledge of the mobile number
+          associated with a target’s Twitter account. Messages can then be sent to Twitter
+          with the source number spoofed.</p>
+          
+          <p>Like email, the originating address of a SMS cannot be trusted. Many SMS
+          gateways allow the originating address of a message to be set to an arbitrary
+          identifier, including someone else’s number.</p>
+          
+          <p>Facebook and Venmo were also vulnerable to the same spoofing attack, but
+          the issues were resolved after disclosing to their respective security teams.</p>
+          
+          <h2 id="scope">Scope</h2>
+          
+          <h3 id="users">Users</h3>
+          
+          <p>Users of Twitter that have a mobile number associated with their account and
+          have not set a PIN code are vulnerable. All of the Twitter <a href="http://support.twitter.com/articles/14020-twitter-sms-commands">SMS
+          commands</a> can be
+          used by an attacker, including the ability to post tweets and modify profile
+          info.</p>
+          
+          <h3 id="service-providers">Service Providers</h3>
+          
+          <p>All services that trust the originating address of SMS messages implicitly and
+          are not using a short code are vulnerable.</p>
+          
+          <h2 id="mitigation">Mitigation</h2>
+          
+          <h3 id="users-1">Users</h3>
+          
+          <p>Until Twitter removes the ability to post via non-short code numbers, users
+          should enable PIN codes (if available in their region) or disable the mobile
+          text messaging feature.</p>
+          
+          <p>Twitter has a PIN code feature that requires every message to be prepended
+          with a four-digit alphanumeric code. This feature mitigates the issue, but is
+          not available to users inside the United States.</p>
+          
+          <h3 id="service-providers-1">Service Providers</h3>
+          
+          <p>The cleanest solution for providers is to use only an SMS short code to receive
+          incoming messages. In most cases, messages to short codes do not leave the
+          carrier network and can only be sent by subscribers. This removes the ease of
+          spoofing via SMS gateways.</p>
+          
+          <p>An alternative, less user-friendly but more secure solution is to require
+          a challenge-response for every message. After receiving an SMS, the service
+          would reply with a short alphanumeric string that needs to be repeated back
+          before the message is processed.</p>
+          
+          <h2 id="disclosure-timelines">Disclosure Timelines</h2>
+          
+          <h3 id="twitter">Twitter</h3>
+          
+          <p>The issue I filed was initially inspected by a member of their security team,
+          but was then routed to the normal support team who did not believe that SMS
+          spoofing was possible. I then reached out directly to someone on the security
+          team who said that it was an “old issue” but that they did not want me to
+          publish until they got “a fix in place”. I received no further communication
+          from Twitter.</p>
+          
+          <table>
+            <tbody>
+              <tr>
+                <td>17 Aug 2012</td>
+                <td>I notified Twitter about the vulnerability via their web form.</td>
+              </tr>
+              <tr>
+                <td>20 Aug 2012</td>
+                <td>Twitter Security routed my report to their mobile support team.</td>
+              </tr>
+              <tr>
+                <td>6 Sep 2012</td>
+                <td>Twitter asked me not to publish until they have fixed the issue.</td>
+              </tr>
+              <tr>
+                <td>15 Oct 2012</td>
+                <td>I requested an update on the issue, and receive no response.</td>
+              </tr>
+              <tr>
+                <td>28 Nov 2012</td>
+                <td>I notified Twitter that I would publicly disclose this issue.</td>
+              </tr>
+              <tr>
+                <td>4 Dec 2012</td>
+                <td>I received confirmation that the issue has been resolved.</td>
+              </tr>
+            </tbody>
+          </table>
+          
+          <h3 id="facebook">Facebook</h3>
+          
+          <p>Initially Facebook did not respond to my report on their security vulnerability
+          page. I then emailed a friend who works at Facebook, who facilitated my contact
+          with their security team.</p>
+          
+          <table>
+            <tbody>
+              <tr>
+                <td>19 Aug 2012</td>
+                <td>I notified Facebook about the vulnerability via their web form.</td>
+              </tr>
+              <tr>
+                <td>6 Sep 2012</td>
+                <td>I received a response after getting a friend on the engineering team to bump the issue internally.</td>
+              </tr>
+              <tr>
+                <td>28 Nov 2012</td>
+                <td>I received confirmation that the issue had been resolved.</td>
+              </tr>
+            </tbody>
+          </table>
+          
+          <p><strong>Disclosure:</strong> I will receive a bounty from Facebook for finding and reporting
+          this issue to them. The <a href="https://www.facebook.com/whitehat/bounty/">Facebook bounty
+          program</a> requires responsible
+          disclosure and time to resolve internally in “good faith” before publishing.</p>
+          
+          <h3 id="venmo">Venmo</h3>
+          
+          <p>I initially disclosed this issue to Venmo support, as they do not have
+          a security contact published. When I did not receive a response, I notified the
+          Braintree security team (Braintree <a href="http://blog.venmo.com/post/29565341097/venmo-joins-braintree">recently
+          acquired</a> Venmo),
+          who responded very promptly.</p>
+          
+          <table>
+            <tbody>
+              <tr>
+                <td>29 Nov 2012</td>
+                <td>I notified Venmo support about the vulnerability.</td>
+              </tr>
+              <tr>
+                <td>30 Nov 2012</td>
+                <td>I notified Braintree security and received a response within 40 minutes.</td>
+              </tr>
+              <tr>
+                <td>1 Dec 2012</td>
+                <td>I received confirmation that Venmo SMS payments have been disabled, mitigating the vulnerability.</td>
+              </tr>
+            </tbody>
+          </table>
+          </article></div>
+    </div>
+  </body>
+</html>

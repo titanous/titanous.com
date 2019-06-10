@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head><meta content="width=device-width, initial-scale=1.0" name="viewport" />
+    <meta charset="utf-8" />
+    <meta content="Jonathan Rudenberg" name="author" />
+    <title>Vulnerabilities in Heroku’s Build System · Jonathan Rudenberg</title>
+    <link href="/assets/styles/stylesheet-cbb924aa137.css" media="screen" rel="stylesheet" type="text/css" />
+    <link href="/posts.xml" rel="alternate" title="Atom feed" type="application/atom+xml" />
+    <script src="//use.typekit.com/dcx3rfw.js" type="text/javascript"></script>
+    <script type="text/javascript">try{Typekit.load();}catch(e){}</script>
+    <script type="text/javascript">(function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+      (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+      m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+      })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+      
+      ga('create', 'UA-33075837-1', 'auto', { 'siteSpeedSampleRate': 100 });
+      ga('set', 'anonymizeIp', true);
+      ga('send', 'pageview');</script>
+    <meta content="summary" name="twitter:card" />
+    <meta content="@titanous" name="twitter:site" />
+    <meta content="@titanous" name="twitter:creator" />
+    <meta content="Vulnerabilities in Heroku’s Build System" name="og:title" />
+    <meta content="Last week I discovered a major security flaw in the Heroku Cedar stack build. This vulnerability exposed sensitive information including API keys, private keys and server credentials." name="og:description" />
+  </head>
+  <body>
+    <div id="content"><div id="about-box">
+        <a class="home" href="/" rel="author">Jonathan Rudenberg</a>
+        <ul>
+          <li><a href="https://github.com/titanous">GitHub</a></li>
+          <li><a href="mailto:jonathan@titanous.com">Email</a></li>
+          <li><a href="/posts.xml">Feed</a></li>
+          <li><a href="/dsp-stingrays">Stingrays</a></li>
+        </ul>
+      </div><div id="main"><article>
+  <h1><a href="/posts/vulnerabilities-in-heroku-build-system">Vulnerabilities in Heroku’s Build System</a></h1>
+  <date datetime="2012-07-03T16:45:00-04:00" pubdate="pubdate" title="2012-07-03 16:45 EDT">July 3, 2012</date><p><strong>Update</strong>: <a href="http://blog.heroku.com/archives/2012/7/3/codon_security_issue_and_response/">Heroku’s official response</a>.</p>
+
+<p>Last week I discovered a major security flaw in the
+<a href="http://www.heroku.com/">Heroku</a> <a href="https://devcenter.heroku.com/articles/cedar">Cedar
+stack</a> <a href="https://devcenter.heroku.com/articles/slug-compiler">build
+system</a>. This vulnerability
+exposed sensitive information including API keys, private keys and server
+credentials.</p>
+
+<p>Once I realized the extent of the vulnerability, I immediately informed Heroku.
+I have been in regular contact with their security team and the problem has
+since been fixed.</p>
+
+<p>Understanding the issue requires operational knowledge of the Cedar stack build
+system.</p>
+
+<h2 id="cedar-build-process">Cedar Build Process</h2>
+
+<p>Since <a href="http://www.infoq.com/presentations/Running-Heroku-on-Heroku/">Heroku runs on
+Heroku</a>, after
+receiving a git push of an application, the build request is dispatched to
+a regular Heroku app named <em>Codon</em> that handles builds. Codon runs
+a <a href="https://devcenter.heroku.com/articles/buildpacks">buildpack</a> which compiles
+the application so that it can be deployed.</p>
+
+<p>Normally apps running on Heroku are entirely isolated using <a href="https://en.wikipedia.org/wiki/LXC">Linux
+Containers</a>, but to perform builds Codon runs
+untrusted code in this container.</p>
+
+<h2 id="source-code-exposure">Source Code Exposure</h2>
+
+<p>I encountered a Ruby exception and backtrace from the Heroku build system while
+experimenting with <a href="https://devcenter.heroku.com/articles/buildpack-api">custom
+buildpacks</a>. Ruby
+backtraces look like this:</p>
+
+<pre><code>app.rb:2:in `foo': undefined method `a' for nil:NilClass (NoMethodError)
+        from app.rb:5:in `&lt;main&gt;'
+</code></pre>
+
+<p>Backtraces include the paths to the source files that encountered the exception.
+This pointed me to the source files for Codon, which indicated the possibility
+of gaining read access to the code.</p>
+
+<p>I then ran a custom buildpack that copied the source code into my Heroku app and
+verified that it was possible to view the source code of Codon.</p>
+
+<p>While examining the source code I discovered that there was another
+vulnerability that was much more serious than source code exposure.</p>
+
+<h2 id="sensitive-credential-exposure">Sensitive Credential Exposure</h2>
+
+<p>Like most Heroku apps, Codon uses <a href="https://en.wikipedia.org/wiki/Environment_variable">environment
+variables</a> to configure
+runtime options including sensitive credentials. This ensures that credentials
+are not checked into version control. However, due to the constraints of Heroku
+containers, Codon is running as the same user as the buildpack, which is
+untrusted. This allows the buildpack to dump the environment variables of Codon
+from the Linux process table:</p>
+
+<pre><code>cat /proc/*/environ
+</code></pre>
+
+<p>The environment variables exposed included critical credentials such as internal
+API keys, a SSH private key with access to source code repositories, Redis
+connection details, and a key with access to their
+<a href="http://campfirenow.com/">Campfire</a> account.</p>
+
+<h2 id="disclosure-timeline">Disclosure Timeline</h2>
+
+<p>Immediately after discovering this vulnerability, I sent an email to Heroku’s
+security team to start the disclosure process. I requested a PGP key first, as
+they did not provide one on their website. Here is the discovery and disclosure
+timeline:</p>
+
+<table>
+  <tbody>
+    <tr>
+      <td>2012-06-26 19:45 PDT</td>
+      <td>Encountered backtrace and began experimenting.</td>
+    </tr>
+    <tr>
+      <td>2012-06-26 20:25 PDT</td>
+      <td>Sent email to Heroku asking for PGP key.</td>
+    </tr>
+    <tr>
+      <td>2012-06-26 22:40 PDT</td>
+      <td>Received PGP key from Heroku.</td>
+    </tr>
+    <tr>
+      <td>2012-06-26 22:56 PDT</td>
+      <td>Received follow-up email with mobile phone number of a Heroku security engineer.</td>
+    </tr>
+    <tr>
+      <td>2012-06-26 22:58 PDT</td>
+      <td>Sent PGP encrypted description of the vulnerability.</td>
+    </tr>
+    <tr>
+      <td>2012-06-26 23:06 PDT</td>
+      <td>Received confirmation of receipt.</td>
+    </tr>
+    <tr>
+      <td>2012-06-27 12:01 PDT</td>
+      <td>Received confirmation that an interim patch would be pushed in a few hours, and full patch by Tuesday (2012-07-03).</td>
+    </tr>
+    <tr>
+      <td>2012-06-28 20:44 PDT</td>
+      <td>Checked validity of credentials, SSH and Campfire keys were still valid.</td>
+    </tr>
+    <tr>
+      <td>2012-06-29 16:13 PDT</td>
+      <td>Checked validity of credentials, all credentials were invalid.</td>
+    </tr>
+    <tr>
+      <td>2012-07-03 13:35 PDT</td>
+      <td>Received confirmation that the issue had been patched.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="customer-impact">Customer Impact</h2>
+
+<p>The build system appears to have been vulnerable since the Cedar stack
+<a href="http://blog.heroku.com/archives/2011/5/31/celadon_cedar/">launched</a> about
+a year ago. Customer applications and credentials could have been compromised at
+some point due to the credential exposed by the vulnerability. Anyone who ran
+applications on Heroku during this period should immediately reset all sensitive
+credentials, and audit their access logs to determine if any infrastructure or
+data has been accessed.</p>
+
+<p>I suspect that a variant of this vulnerability may exist in other Platform as
+a Service build systems. Further research is warranted.</p>
+
+<p><em><strong>Disclosure</strong>: At the time of publishing, I was a Heroku customer. Heroku offered me a paid
+penetration test contract, but required that I sign a retroactive non-disclosure
+agreement which would have precluded publishing this article.</em></p>
+</article></div>
+    </div>
+  </body>
+</html>
